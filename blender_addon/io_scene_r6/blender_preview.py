@@ -384,20 +384,34 @@ def import_siege_model(gltf_path):
     if not gltf_path.is_file():
         raise FileNotFoundError(gltf_path)
 
-    before = {
+    document = json.loads(gltf_path.read_text(encoding="utf-8"))
+    source_model = document["scenes"][document.get("scene", 0)].get("name")
+
+    before_materials = {
         material.as_pointer()
         for material in bpy.data.materials
+    }
+    before_objects = {
+        obj.as_pointer()
+        for obj in bpy.data.objects
     }
 
     result = bpy.ops.import_scene.gltf(filepath=str(gltf_path), disable_bone_shape=True, bone_heuristic="TEMPERANCE")
     if "FINISHED" not in result:
         raise RuntimeError(f"glTF import did not finish: {gltf_path}")
 
-    imported = tuple(
+    imported_materials = tuple(
         material for material in bpy.data.materials
-        if material.as_pointer() not in before
+        if material.as_pointer() not in before_materials
     )
-    apply_siege_materials(gltf_path, materials=imported)
+    apply_siege_materials(gltf_path, materials=imported_materials)
+
+    # Manual appearance correction for Fuze's default body only
+    if source_model == "000000156B7353F8":
+        for obj in bpy.data.objects:
+            if obj.as_pointer() not in before_objects and obj.type == "MESH" and obj.name.partition(".")[0] == "part_00000007B8293A4C":
+                obj.hide_set(True)
+                obj.hide_render = True
 
 def render_preview(gltf_path: Path, output_path: Path) -> None:
     bpy.ops.wm.read_factory_settings(use_empty=True)

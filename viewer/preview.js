@@ -164,6 +164,17 @@ try {
         await applySiegeClothing(gltf, url);
         await applySiegeSurfaces(gltf, url);
         await applyExperimentalHair(gltf, url);
+
+        // manual appearance correction for Fuze's default body only
+        const source = gltf.parser.json;
+        if (source.scenes?.[source.scene ?? 0]?.name === "000000156B7353F8") {
+            gltf.scene.traverse(object => {
+                if (object.isMesh && object.name === "part_00000007B8293A4C") {
+                    object.visible = false;
+                }
+            });
+        }
+
         model.add(gltf.scene);
     }
 
