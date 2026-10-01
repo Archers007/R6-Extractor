@@ -66,6 +66,8 @@ To import an existing export manually, use **File → Import → Rainbow Six Sie
 
 Blender 4.5 is required by this alpha. The UI confirms that Blender launched, import errors appear in Blender's system console.
 
+FK posing uses Blender’s Pose Mode. The R6 importer adjusts bone display lengths and enables In Front for easier selection. Head hierarchy and deformation support still vary by operator. IK remains experimental and optional.
+
 ### Experimental IK controls
 
 Enable **Create experimental IK controls** in the app before clicking **Open in Blender**. The option is off by default.

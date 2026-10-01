@@ -377,6 +377,52 @@ def apply_siege_materials(gltf_path: Path, *, materials=None) -> None:
             links.new(rough.outputs[0], principled.inputs["Roughness"])
             principled.inputs["Metallic"].default_value = 0.0
 
+def size_fk_bones(objects):
+    """Shorten imported root and leaf bones without moving their joints"""
+
+    arms = [obj for obj in objects if obj.type == "ARMATURE"]
+    if not arms:
+        return
+    if bpy.context.mode != "OBJECT":
+        raise RuntimeError("FK bone sizing requires Object Mode")
+
+    for arm in arms:
+        if arm.data.users != 1 or any(bone.use_connect for bone in arm.data.bones):
+            raise RuntimeError(f"Unexpected shared or connected armature: {arm.name}")
+
+    selected = list(bpy.context.selected_objects)
+    active = bpy.context.view_layer.objects.active
+
+    try:
+        bpy.ops.object.select_all(action="DESELECT")
+        for arm in arms:
+            arm.select_set(True)
+            bpy.context.view_layer.objects.active = arm
+            bpy.ops.object.mode_set(mode="EDIT")
+
+            for bone in arm.data.edit_bones:
+                length = max(bone.length, 0.015)
+                if bone.parent is None:
+                    length = min(length, 0.04)
+                elif not bone.children:
+                    length = min(length, 0.025)
+
+                if abs(bone.length - length) > 0.000001:
+                    bone.length = length
+
+            bpy.ops.object.mode_set(mode="OBJECT")
+            arm.show_in_front = True
+            arm.select_set(False)
+    finally:
+        if bpy.context.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        for obj in selected:
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = active
+
+    bpy.context.view_layer.update()
+
 def import_siege_model(gltf_path):
     """Import a prepared glTF and apply its Siege preview materials"""
 
@@ -399,6 +445,8 @@ def import_siege_model(gltf_path):
     result = bpy.ops.import_scene.gltf(filepath=str(gltf_path), disable_bone_shape=True, bone_heuristic="TEMPERANCE")
     if "FINISHED" not in result:
         raise RuntimeError(f"glTF import did not finish: {gltf_path}")
+
+    size_fk_bones(obj for obj in bpy.data.objects if obj.as_pointer() not in before_objects)
 
     imported_materials = tuple(
         material for material in bpy.data.materials
