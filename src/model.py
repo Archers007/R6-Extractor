@@ -223,12 +223,14 @@ def read_mesh_bindings(payload: bytes) -> dict[int, MeshBinding]:
         blob = payload[entry.data_offset:entry.end]
 
         if len(blob) < 20:
-            raise ValueError(f"Mesh binding {entry.metadata.uid:016X} is truncated")
+            # Map packages contain tiny placeholder mesh entries; skip them
+            # instead of aborting the whole export.
+            continue
 
         embedded_type = struct.unpack_from("<I", blob, 0)[0]
 
         if embedded_type != CURRENT_MESH:
-            raise ValueError(f"Mesh binding {entry.metadata.uid:016X} has an invalid type")
+            continue
 
         bone_count = struct.unpack_from("<I", blob, 8)[0]
         records_end = 20 + bone_count * BONE_RECORD_SIZE
@@ -237,28 +239,38 @@ def read_mesh_bindings(payload: bytes) -> dict[int, MeshBinding]:
         geometry_offset = records_end + 1
 
         if geometry_offset +8 > len(blob):
-            raise ValueError(f"Mesh binding {entry.metadata.uid:016X} has a truncated bone table")
+            continue
 
         bone_ids = []
         inverse_bind_matrices = []
+
+        valid = True
 
         for bone_index in range(bone_count):
             record_offset = 20 + bone_index * BONE_RECORD_SIZE
             record_tag, bone_id = struct.unpack_from("<II", blob, record_offset)
 
             if record_tag != BONE_RECORD_TAG:
-                raise ValueError(f"Mesh binding {entry.metadata.uid:016X} bone {bone_index} has an invalid record tag")
+                valid = False
+                break
 
             inverse_bind_matrix = struct.unpack_from("<16f", blob, record_offset + 8)
 
             bone_ids.append(bone_id)
             inverse_bind_matrices.append(inverse_bind_matrix)
 
+        if not valid:
+            continue
+
         geometry_uid = struct.unpack_from("<Q", blob, geometry_offset)[0]
-        pose_transforms = _read_pose_transforms(blob, geometry_offset + 8)
+
+        try:
+            pose_transforms = _read_pose_transforms(blob, geometry_offset + 8)
+        except ValueError:
+            continue
 
         if geometry_uid in bindings:
-            raise ValueError(f"Geometry {geometry_uid:016X} has duplicate mesh bindings")
+            continue
 
         bindings[geometry_uid] = MeshBinding(
             geometry_uid=geometry_uid,
