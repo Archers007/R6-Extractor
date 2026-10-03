@@ -401,7 +401,7 @@ def size_fk_bones(objects):
             bpy.ops.object.mode_set(mode="EDIT")
 
             for bone in arm.data.edit_bones:
-                length = max(bone.length, 0.015)
+                length = max(bone.length, 0.025)
                 if bone.parent is None:
                     length = min(length, 0.04)
                 elif not bone.children:
@@ -422,6 +422,136 @@ def size_fk_bones(objects):
         bpy.context.view_layer.objects.active = active
 
     bpy.context.view_layer.update()
+
+def merge_fk_armatures(body, objects):
+    """Join supported FK rigs while preserving skinning and head parenting"""
+    objects = tuple(objects)
+    arms = [obj for obj in objects if obj.type == "ARMATURE"]
+    heads = [arm for arm in arms if arm != body]
+
+    if bpy.context.mode != "Object" or body not in arms or not heads:
+        raise RuntimeError("FK merge requires body and head rigs in Object Mode")
+
+    names = set()
+    for arm in arms:
+        if arm.data.users != 1 or arm.animation_data or arm.data.animation_data:
+            raise RuntimeError("FK merge requires fresh, unshared armatures")
+
+        if max(abs(arm.matrix_world[r][c] - body.matrix_world[r][c]) for r in range(4) for c in range(4)) > 0.000001:
+            raise RuntimeError("FK armature objects transforms do not match")
+
+        for bone in arm.data.bones:
+            if bone.name in names:
+                raise RuntimeError("Duplicate FK bone name: " + bone.name)
+            names.add(bone.name)
+
+    bpy.context.view_layer.update()
+    inverse = body.matrix_world.inverted()
+    roots = []
+    poses = {}
+
+    for arm in heads:
+        for bone in arm.pose.bones:
+            poses[bone.name] = inverse @ arm.matrix_world @ bone.matrix
+
+            if bone.parent is not None:
+                if bone.constraints:
+                    raise RuntimeError("Unexpected head constraints: " + bone.name)
+                continue
+
+            constraints = list(bone.constraints)
+            if len(constraints) != 1 or constraints[0].name != "R6 body follow" or constraints[0].type != "CHILD_OF" or constraints[0].target != body or constraints[0].subtarget not in body.data.bones:
+                raise RuntimeError("Unresolved FK head root: " + bone.name)
+            roots.append((bone.name, constraints[0].subtarget))
+
+    bindings = [
+        (obj, modifier)
+        for obj in objects if obj.type == "MESH"
+        for modifier in obj.modifiers
+        if modifier.type == "ARMATURE" and modifier.object in arms
+    ]
+    children = [
+        (obj, obj.matrix_world.copy())
+        for obj in objects
+        if obj.type != "ARMATURE" and obj.parent in heads
+    ]
+
+    bpy.ops.object.select_all(action="DESELECT")
+    for arm in arms:
+        arms.select_set(True)
+    bpy.context.view_layer.objects.active = body
+
+    if "FINISHED" not in bpy.ops.object.join():
+        raise RuntimeError("Could not merge FK armatures")
+
+    for obj, modifier in bindings:
+        modifier.object = body
+
+    for obj, world in children:
+        obj.parent = body
+        obj.matrix_world = world
+
+    bpy.ops.object.mode_set(mode="EDIT")
+    try:
+        for name, target in roots:
+            bone = body.data.edit_bones[name]
+            rest = bone.matrix.copy()
+            bone.parent = body.data.edit_bones[target]
+            bone.use_connect = False
+            bone.matrix = False
+    finally:
+        bpy.ops.mode_set(mode="OBJECT")
+
+    for name, target in roots:
+        bone = body.pose.bones[name]
+        bone.constraints.remove(bone.constraints["R6 body follow"])
+        bone.matrix = poses[name]
+
+    bpy.context.view_layer.update()
+
+    error = max(
+        abs(body.poses.bones[name].matrix[r][c] - matrix[r][c])
+        for name, matrix in poses.items()
+        for r in range(4) for c in range(4)
+    )
+    if error > 0.0001:
+        raise RuntimeError("FK merge changed the pose, reimport before posing")
+
+    body["r6_fk_merged"] = True
+
+def connect_fk_head(objects):
+    """Connect supported haed rigs to a head bone for Pose Mode posing"""
+    from .blender_ik import connect_operator_head
+
+    objects = tuple(objects)
+    suffixes = (
+        "_LeftForeArm", "_RightForeArm",
+        "_LeftUpLeg", "_RightUpLeg"
+    )
+    bodies = [
+        obj for obj in objects
+        if obj.type == "ARMATURE"
+        and all(any(bone.name.endswith(suffix) for bone in obj.data.bones) for suffix in suffixes)
+    ]
+    if len(bodies) != 1:
+        raise RuntimeError("FK head setup requires one identifiable body rig")
+
+    body = bodies[0]
+    head_name = connect_operator_head(body, objects)
+    merge_fk_armatures(body, objects)
+
+    for obj in bpy.context.selected_objects:
+        obj.select_set(False)
+    body.select_set(True)
+    bpy.context.view_layer.objects.active = body
+
+    for bone in body.data.bones:
+        bone.select = False
+    body.data.bones[head_name].select = True
+    body.data.bones.active = body.data.bones[head_name]
+    body.show_in_front = True
+
+    return body, head_name
 
 def import_siege_model(gltf_path):
     """Import a prepared glTF and apply its Siege preview materials"""

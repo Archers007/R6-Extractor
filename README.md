@@ -68,6 +68,10 @@ Blender 4.5 is required by this alpha. The UI confirms that Blender launched, im
 
 FK posing uses Blender’s Pose Mode. The R6 importer adjusts bone display lengths and enables In Front for easier selection. Head hierarchy and deformation support still vary by operator. IK remains experimental and optional.
 
+On supported operators FK import combines the head and body into one armature and selects its head bone. Enter Pose Mode and rotate that bone with R. It may be named R6_Head or retain its imported Head name. 
+
+Unsupported head mappings produce a warning and retain separate armatures.
+
 ### Experimental IK controls
 
 Enable **Create experimental IK controls** in the app before clicking **Open in Blender**. The option is off by default.

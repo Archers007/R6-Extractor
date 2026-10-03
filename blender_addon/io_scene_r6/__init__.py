@@ -6,12 +6,12 @@ import traceback
 import bpy
 from bpy.props import StringProperty, BoolProperty
 
-from .blender_preview import import_siege_model
+from .blender_preview import import_siege_model, connect_fk_head
 
 bl_info = {
     "name": "Rainbow Six Siege Operator Import",
     "author": "TrueShadow01",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 5, 0),
     "location": "File > Import > Rainbow Six Siege Operator",
     "description": "Import exported head/body models with Siege Materials",
@@ -51,6 +51,11 @@ class IMPORT_SCENE_OT_r6_operator(bpy.types.Operator):
 
             models.extend(files)
 
+        before_objects = {
+            obj.as_pointer()
+            for obj in bpy.data.objects
+        }
+
         completed = 0
         try:
             for gltf in models:
@@ -60,6 +65,17 @@ class IMPORT_SCENE_OT_r6_operator(bpy.types.Operator):
             traceback.print_exc()
             self.report({"WARNING"}, f"Import stopped after {completed}/{len(models)} models. Partial objects may remain, Undo before retrying. See the system console for details.")
             # Preserve a undo step for changes made before the failure
+            return {"FINISHED"}
+
+        objects = [
+            obj for obj in bpy.data.objects if obj.as_pointer() not in before_objects
+        ]
+
+        try:
+            arm, head_name = connect_fk_head(objects)
+        except Exception as error:
+            traceback.print_exc()
+            self.report({"WARNING"}, f"Models imported, FK setup incomplete: {error}")
             return {"FINISHED"}
 
         self.report({"INFO"}, f"Imported {folder.name}: {completed} models with Siege materials.")

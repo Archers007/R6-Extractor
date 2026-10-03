@@ -19,7 +19,7 @@ def main():
     if bpy.app.version[:2] != (4, 5):
         raise RuntimeError("Blender 4.5 is required")
 
-    from io_scene_r6.blender_preview import import_siege_model
+    from io_scene_r6.blender_preview import import_siege_model, connect_fk_head
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--experimental-ik", action="store_true")
@@ -34,6 +34,14 @@ def main():
 
     for model in args.models:
         import_siege_model(model)
+
+    if not args.experimental_ik:
+        try:
+            arm, head_name = connect_fk_head(list(bpy.context.scene.objects))
+        except Exception as error:
+            warning("FK setup incomplete", str(error))
+        else:
+            print(f"FK head ready: {head_name}. Select Pose Mode and rotate this bone", flush=True)
 
     if args.experimental_ik:
         objects = list(bpy.context.scene.objects)
