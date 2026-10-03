@@ -787,11 +787,16 @@ def resolve_geometry_records(model_uid: int, children: Mapping[int, Iterable[int
 
     return tuple(sorted(records, key=lambda record: record.uid))
 
-def decode_mesh_parts(records: Iterable[AssetRecord], bindings: Mapping[int, MeshBinding] | None = None) -> tuple[MeshPart, ...]:
+def decode_mesh_parts(records: Iterable[AssetRecord], bindings: Mapping[int, MeshBinding] | None = None, progress=None) -> tuple[MeshPart, ...]:
     parts: list[MeshPart] = []
     bindings = bindings or {}
+    records = tuple(records)
+    total = len(records)
 
-    for record in records:
+    for position, record in enumerate(records):
+        if progress is not None:
+            progress("decoding", position + 1, total)
+
         payload = load_asset_payload(record)
 
         (
@@ -987,13 +992,23 @@ def resolve_export_material_textures(texture_sets: Iterable[MaterialTextureSet],
         for texture_set in texture_sets
     )
 
-def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: AssetIndex, output_directory: str | Path) -> ModelExportResult:
-    """Export every geometry child and linked decodable texture"""
+def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: AssetIndex, output_directory: str | Path, progress=None) -> ModelExportResult:
+    """Export every geometry child and linked decodable texture.
+
+    progress, when given, is called as progress(stage, done, total) so
+    callers can render a progress bar for long exports.
+    """
+
+    def _report(stage: str, done: int, total: int) -> None:
+        if progress is not None:
+            progress(stage, done, total)
 
     output_directory = Path(output_directory).resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
 
+    _report("resolving", 0, 1)
     geometry_records = resolve_geometry_records(model_uid, children, index)
+    _report("resolving", 1, 1)
     model_record = index.primary(model_uid)
     model_payload = (
         load_asset_payload(model_record)
@@ -1035,7 +1050,8 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
             for uid, binding in  mesh_bindings.items()
         }
 
-    parts = decode_mesh_parts(geometry_records, mesh_bindings)
+    parts = decode_mesh_parts(geometry_records, mesh_bindings, progress=lambda stage, done, total: _report(stage, done, total))
+    _report("textures", 0, 1)
     texture_uids = resolve_texture_uids(model_uid, children, index)
 
     (
@@ -1044,6 +1060,7 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
         normal,
         specular
     ) = decode_model_textures(texture_uids, index, output_directory)
+    _report("textures", 1, 1)
 
     export_parts = parts
     material_textures: tuple[MaterialTextures, ...] = ()
@@ -1094,11 +1111,13 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
         bake_tinted_material(slot, output_directory)
         for slot in material_textures
     )
+    _report("materials", 1, 1)
 
     part_count = len(parts)
     vertex_count = sum(len(part.vertices) for part in parts)
     triangle_count = sum(len(island.faces) for part in parts for island in part.islands)
 
+    _report("writing", 0, 1)
     gltf_path = write_gltf(
         model_uid,
         export_parts,
@@ -1109,6 +1128,7 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
         material_textures=material_textures or None,
         skeletons=resolve_model_skeletons(model_payload, index) if model_payload is not None else {}
     )
+    _report("writing", 1, 1)
 
     return ModelExportResult(
         model_uid=model_uid,
