@@ -912,36 +912,91 @@ def _resolve_bundle(value: str, game_dir: Path) -> Path:
     return matches[0].resolve()
 
 
+def _resolve_map_forge(keyword: str, game_dir: Path) -> Path:
+    """Resolve a per-map forge archive from a keyword."""
+
+    needle = keyword.lower()
+    candidates = sorted(
+        path
+        for path in game_dir.glob("datapc64_pvp*.forge")
+        if "gidata" not in path.name.lower() and needle in path.name.lower()
+    )
+
+    if not candidates:
+        raise ValueError(f"No map archive matches: {keyword}")
+
+    if len(candidates) > 1:
+        listing = "\n".join(f"  {path.name}" for path in candidates[:20])
+        raise ValueError(
+            f"{len(candidates)} map archives match {keyword!r}, narrow it down:\n{listing}"
+        )
+
+    return candidates[0]
+
+
 def command_maps(args: argparse.Namespace) -> int:
     game_dir = game_directory()
 
     if game_dir is None:
         raise ValueError("maps requires GAME_DIR in config.py")
 
-    bundle = _resolve_bundle(args.bundle, game_dir)
-
-    (
-        prefix,
-        depgraph_path,
-        mesh_archives
-    ) = resolve_bundle_paths(bundle, include_textures=True)
-
-    print(f"Bundle: {prefix}")
-    print(f"Mesh/texture archives: {len(mesh_archives)}")
-    print(f"Depgraph: {depgraph_path.name}", flush=True)
-
-    children = load_depgraph(depgraph_path)
-
-    print(f"Building index over {len(mesh_archives)} archives...", flush=True)
-
-    index = build_index(mesh_archives)
-    models = discover_models(children, index)
+    if bool(getattr(args, "bundle", None)) == bool(getattr(args, "map", None)):
+        raise ValueError("specify exactly one of --bundle or --map")
 
     if args.minimum_parts < 1:
         raise ValueError("--minimum-parts must be at least 1")
 
     if args.limit < 0:
         raise ValueError("--limit cannot be negative")
+
+    database: Path | None = None
+
+    if getattr(args, "map", None):
+        map_forge = _resolve_map_forge(args.map, game_dir)
+        depgraph_path = map_forge.with_suffix(".depgraphbin")
+
+        if not depgraph_path.is_file():
+            raise FileNotFoundError(f"Map dependency graph not found: {depgraph_path.name}")
+
+        print(f"Map archive: {map_forge.name}")
+        print(f"Depgraph: {depgraph_path.name}", flush=True)
+
+        children = load_depgraph(depgraph_path)
+
+        database = Path(args.database).expanduser().resolve()
+
+        uids: set[int] = set(children)
+
+        for child_list in children.values():
+            uids.update(child_list)
+
+        uids.update((0x5EC7E82135, 0x5E768B9E1A))
+
+        print(f"Loading {len(uids)} assets from database...", flush=True)
+
+        index = load_asset_index(database, uids)
+        prefix = map_forge.stem
+        mesh_archives = (map_forge,)
+    else:
+        bundle = _resolve_bundle(args.bundle, game_dir)
+
+        (
+            prefix,
+            depgraph_path,
+            mesh_archives
+        ) = resolve_bundle_paths(bundle, include_textures=True)
+
+        print(f"Bundle: {prefix}")
+        print(f"Mesh/texture archives: {len(mesh_archives)}")
+        print(f"Depgraph: {depgraph_path.name}", flush=True)
+
+        children = load_depgraph(depgraph_path)
+
+        print(f"Building index over {len(mesh_archives)} archives...", flush=True)
+
+        index = build_index(mesh_archives)
+
+    models = discover_models(children, index)
 
     selected = [
         model
@@ -953,6 +1008,25 @@ def command_maps(args: argparse.Namespace) -> int:
         selected = selected[:args.limit]
 
     print(f"Models discovered: {len(models)}  Selected: {len(selected)}", flush=True)
+
+    if database is not None and selected:
+        texture_uids: set[int] = set()
+
+        for model in selected:
+            texture_uids.update(resolve_direct_texture_uids(model.uid, index))
+
+        missing = {
+            texture_uid
+            for texture_uid in texture_uids
+            if texture_uid not in index
+        }
+
+        if missing:
+            print(f"Loading {len(missing)} textures from database...", flush=True)
+            additional = load_asset_index(database, missing)
+
+            for record in additional.records():
+                index.add(record)
 
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -1106,8 +1180,10 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--database", help="use a SQLite asset index")
     model.set_defaults(handler=command_model)
 
-    maps = commands.add_parser("maps", help="batch-export every model in a mesh bundle as glTF")
-    maps.add_argument("--bundle", required=True, help="mesh archive path, glob pattern, or keyword matched against *_bnk_*mesh.forge in GAME_DIR")
+    maps = commands.add_parser("maps", help="batch-export every model in a mesh bundle or map as glTF")
+    maps.add_argument("--bundle", help="mesh archive path, glob pattern, or keyword matched against *_bnk_*mesh.forge in GAME_DIR")
+    maps.add_argument("--map", help="map keyword matched against per-map datapc64_pvp*.forge archives in GAME_DIR (uses the asset database)")
+    maps.add_argument("-d", "--database", default="output/r6-assets.sqlite", help="SQLite database path (for --map)")
     maps.add_argument("-o", "--output", default="output/maps", help="output directory")
     maps.add_argument("--minimum-parts", type=int, default=1, help="skip models with fewer geometry parts")
     maps.add_argument("--limit", type=int, default=0, help="maximum models to export, 0 exports all")
