@@ -37,8 +37,10 @@ from src.model import (
 )
 from src.model_catalog import (
     COMPILED_MESH_OBJECT,
+    ModelCatalog,
     build_model_catalog,
     discover_default_operator_candidates,
+    discover_models,
     discover_unknown_operator_candidates,
     resolve_bundle_paths,
     write_model_catalog
@@ -867,6 +869,169 @@ def command_model(args: argparse.Namespace) -> int:
 
     return 0
 
+def _resolve_bundle(value: str, game_dir: Path) -> Path:
+    """Resolve a bundle mesh archive from a path, glob pattern, or keyword."""
+
+    candidate = Path(value).expanduser()
+
+    if candidate.is_file():
+        return candidate.resolve()
+
+    if any(char in value for char in "*?["):
+        matches = sorted(game_dir.glob(value))
+    else:
+        needle = value.lower()
+        matches = sorted(
+            path
+            for path in game_dir.glob("*_bnk_*mesh.forge")
+            if needle in path.name.lower()
+        )
+
+    if not matches:
+        raise ValueError(f"No mesh bundle matches: {value}")
+
+    if len(matches) > 1:
+        prefixes: dict[str, list] = {}
+
+        for match in matches:
+            prefix = match.name.split("_bnk_", 1)[0]
+            prefixes.setdefault(prefix, []).append(match)
+
+        if len(prefixes) == 1:
+            # several mesh archives of the same bundle: any one resolves it
+            return matches[0].resolve()
+
+        listing = "\n".join(
+            f"  {prefix} ({len(paths)} archives)"
+            for prefix, paths in sorted(prefixes.items())[:20]
+        )
+        raise ValueError(
+            f"{len(prefixes)} bundles match {value!r}, narrow it down:\n{listing}"
+        )
+
+    return matches[0].resolve()
+
+
+def command_maps(args: argparse.Namespace) -> int:
+    game_dir = game_directory()
+
+    if game_dir is None:
+        raise ValueError("maps requires GAME_DIR in config.py")
+
+    bundle = _resolve_bundle(args.bundle, game_dir)
+
+    (
+        prefix,
+        depgraph_path,
+        mesh_archives
+    ) = resolve_bundle_paths(bundle, include_textures=True)
+
+    print(f"Bundle: {prefix}")
+    print(f"Mesh/texture archives: {len(mesh_archives)}")
+    print(f"Depgraph: {depgraph_path.name}", flush=True)
+
+    children = load_depgraph(depgraph_path)
+
+    print(f"Building index over {len(mesh_archives)} archives...", flush=True)
+
+    index = build_index(mesh_archives)
+    models = discover_models(children, index)
+
+    if args.minimum_parts < 1:
+        raise ValueError("--minimum-parts must be at least 1")
+
+    if args.limit < 0:
+        raise ValueError("--limit cannot be negative")
+
+    selected = [
+        model
+        for model in models
+        if model.part_count >= args.minimum_parts
+    ]
+
+    if args.limit:
+        selected = selected[:args.limit]
+
+    print(f"Models discovered: {len(models)}  Selected: {len(selected)}", flush=True)
+
+    output = Path(args.output).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+
+    catalog = ModelCatalog(
+        prefix=prefix,
+        depgraph_path=depgraph_path,
+        mesh_archives=mesh_archives,
+        index=index,
+        models=tuple(selected),
+    )
+    catalog_path = write_model_catalog(catalog, output / "catalog.json")
+    print(f"Catalog: {catalog_path}")
+
+    exported = 0
+    skipped = 0
+    failed = 0
+    manifest: list[dict] = []
+
+    for position, model in enumerate(selected, start=1):
+        uid_text = f"{model.uid:016X}"
+        model_directory = output / uid_text
+        gltf_path = model_directory / f"{uid_text}.gltf"
+
+        if gltf_path.is_file():
+            skipped += 1
+            manifest.append(
+                {
+                    "uid": uid_text,
+                    "status": "resumed",
+                    "gltf": str(gltf_path),
+                    "parts": model.part_count,
+                }
+            )
+            continue
+
+        try:
+            result = export_model(model.uid, children, index, model_directory)
+        except Exception as error:  # keep the batch going
+            failed += 1
+            print(f"[{position}/{len(selected)}] {uid_text}: FAILED ({error})", flush=True)
+            manifest.append(
+                {
+                    "uid": uid_text,
+                    "status": "failed",
+                    "error": str(error),
+                    "parts": model.part_count,
+                }
+            )
+            continue
+
+        exported += 1
+        print(
+            f"[{position}/{len(selected)}] {uid_text}: "
+            f"exported ({model.part_count} parts, {result.triangle_count} tris)",
+            flush=True,
+        )
+        manifest.append(
+            {
+                "uid": uid_text,
+                "status": "exported",
+                "gltf": str(result.gltf_path),
+                "parts": model.part_count,
+                "triangles": result.triangle_count,
+            }
+        )
+
+    manifest_path = output / "export-manifest.json"
+
+    with manifest_path.open("w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2)
+
+    print()
+    print(f"Exported: {exported}  Skipped: {skipped}  Failed: {failed}")
+    print(f"Manifest: {manifest_path}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect and extract Rainbow Six Siege Forge archives")
 
@@ -940,6 +1105,13 @@ def build_parser() -> argparse.ArgumentParser:
     model.add_argument("--archive-only", action="store_true", help="index only the input mesh archive")
     model.add_argument("--database", help="use a SQLite asset index")
     model.set_defaults(handler=command_model)
+
+    maps = commands.add_parser("maps", help="batch-export every model in a mesh bundle as glTF")
+    maps.add_argument("--bundle", required=True, help="mesh archive path, glob pattern, or keyword matched against *_bnk_*mesh.forge in GAME_DIR")
+    maps.add_argument("-o", "--output", default="output/maps", help="output directory")
+    maps.add_argument("--minimum-parts", type=int, default=1, help="skip models with fewer geometry parts")
+    maps.add_argument("--limit", type=int, default=0, help="maximum models to export, 0 exports all")
+    maps.set_defaults(handler=command_maps)
 
     return parser
 
