@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import csv
+import json
 from collections import Counter
 from pathlib import Path
 from typing import Sequence
@@ -519,8 +520,127 @@ def _prepare_operator_previews(candidates, depgraphs, database: Path, output_dir
     print(f"Failed: {failed}")
     print(f"Review CSV: {review_path}")
 
+def _find_children(depgraphs: dict, model_uid: int):
+    """Return the dependency-children mapping that knows this model UID."""
+
+    for children in depgraphs.values():
+        if model_uid in children:
+            return children
+
+    return None
+
+
+def _safe_dirname(name: str, fallback: str) -> str:
+    safe = "".join(char if (char.isalnum() or char in " -_") else "_" for char in name).strip()
+
+    return safe or fallback
+
+
+def _export_all_operators(operators, depgraphs, database: Path, output_directory: str | Path) -> int:
+    """Batch-export every registry operator's head + body primary models as glTF.
+
+    Resumable: a model whose ``<UID>.gltf`` already exists is skipped.
+    Failures are logged and do not stop the batch.
+    """
+
+    output = Path(output_directory).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+
+    exported = 0
+    skipped = 0
+    failed = 0
+    manifest: list[dict] = []
+
+    for position, operator in enumerate(operators, start=1):
+        safe_name = _safe_dirname(operator.name, f"op_{operator.uid:016X}")
+        print(f"[{position}/{len(operators)}] {operator.name}", flush=True)
+
+        for label, part in (("head", operator.head), ("body", operator.body)):
+            groups = part.model_groups
+
+            if not groups or not groups[0]:
+                print(f"  {label}: no primary models, skipped")
+                manifest.append(
+                    {"operator": operator.name, "part": label, "uid": None, "status": "no-models"}
+                )
+                continue
+
+            for model_uid in groups[0]:
+                uid_text = f"{model_uid:016X}"
+                model_directory = output / safe_name / label
+                gltf_path = model_directory / f"{uid_text}.gltf"
+
+                if gltf_path.is_file():
+                    print(f"  {label} {uid_text}: already exported, skipped")
+                    skipped += 1
+                    manifest.append(
+                        {
+                            "operator": operator.name,
+                            "part": label,
+                            "uid": uid_text,
+                            "status": "resumed",
+                            "gltf": str(gltf_path),
+                        }
+                    )
+                    continue
+
+                children = _find_children(depgraphs, model_uid)
+
+                if children is None:
+                    print(f"  {label} {uid_text}: not found in any depgraph, skipped")
+                    skipped += 1
+                    manifest.append(
+                        {"operator": operator.name, "part": label, "uid": uid_text, "status": "no-depgraph"}
+                    )
+                    continue
+
+                try:
+                    index = _load_database_model_index(database, model_uid, children)
+                    result = export_model(model_uid, children, index, model_directory)
+                except Exception as error:  # keep the batch going
+                    failed += 1
+                    print(f"  {label} {uid_text}: FAILED ({error})")
+                    manifest.append(
+                        {
+                            "operator": operator.name,
+                            "part": label,
+                            "uid": uid_text,
+                            "status": "failed",
+                            "error": str(error),
+                        }
+                    )
+                    continue
+
+                exported += 1
+                print(f"  {label} {uid_text}: exported ({result.triangle_count} tris)")
+                manifest.append(
+                    {
+                        "operator": operator.name,
+                        "part": label,
+                        "uid": uid_text,
+                        "status": "exported",
+                        "gltf": str(result.gltf_path),
+                        "triangles": result.triangle_count,
+                    }
+                )
+
+    manifest_path = output / "export-manifest.json"
+
+    with manifest_path.open("w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2)
+
+    print()
+    print(f"Operators: {len(operators)}  Exported: {exported}  Skipped: {skipped}  Failed: {failed}")
+    print(f"Manifest: {manifest_path}")
+
+    return 0
+
+
 def command_operators(args: argparse.Namespace) -> int:
     game_dir = game_directory()
+
+    if getattr(args, "export_all", None) and not getattr(args, "registry", False):
+        raise ValueError("--export-all requires --registry")
 
     if game_dir is None:
         raise ValueError("operators requires GAME_DIR in config.py")
@@ -534,6 +654,21 @@ def command_operators(args: argparse.Namespace) -> int:
 
         operators = read_operator_registry(game_dir / "datapc64.forge")
         selected = operators[:args.limit] if args.limit else operators
+
+        if getattr(args, "export_all", None):
+            depgraph_paths = tuple(sorted(game_dir.glob("*.depgraphbin")))
+
+            if not depgraph_paths:
+                raise FileNotFoundError(f"No dependency graphs found under {game_dir}")
+
+            depgraphs = {
+                path: load_depgraph(path)
+                for path in depgraph_paths
+            }
+            database = Path(args.database).expanduser().resolve()
+
+            return _export_all_operators(selected, depgraphs, database, args.export_all)
+
         references = []
 
         for operator in operators:
@@ -786,6 +921,7 @@ def build_parser() -> argparse.ArgumentParser:
     operators.add_argument("--limit", type=int, default=0, help="maximum candidates to display, 0 displays all")
     operators.add_argument("--max-parents", type=int, default=20, help="ignore generic evidence referenced by more than this many parents")
     operators.add_argument("--previews", metavar="DIRECTORY", help="prepare glTF files and a CSV for Blender previews")
+    operators.add_argument("--export-all", metavar="DIRECTORY", help="batch-export every registry operator's head+body models as glTF into DIRECTORY (resumable, requires --registry)")
     operators.set_defaults(handler=command_operators)
 
     models = commands.add_parser("models", help="discover model UIDs and geometry parts")
