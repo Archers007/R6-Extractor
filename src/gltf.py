@@ -640,21 +640,31 @@ def write_gltf(model_uid: int, parts: Iterable[MeshPartLike], output_directory: 
         specular=specular
     )
 
+    _alpha_cache: dict[str, bool] = {}
+
     def uses_alpha(filename: str) -> bool:
+        # Materials often share diffuse textures; decoding each PNG's alpha
+        # channel is the slowest part of the material pass, so cache it.
+        cached = _alpha_cache.get(filename)
+        if cached is not None:
+            return cached
+
         path = output_directory / filename
 
         if not path.is_file():
-            return False
+            result = False
+        else:
+            with Image.open(path) as source:
+                if "A" not in source.getbands():
+                    result = False
+                else:
+                    minimum, _ = source.getchannel("A").getextrema()
+                    # Some opaque Siege maps use alpha as packed material data
+                    # zero values indicate genuine transparent regions
+                    result = minimum == 0
 
-        with Image.open(path) as source:
-            if "A" not in source.getbands():
-                return False
-
-            minimum, _ = source.getchannel("A").getextrema()
-
-        # Some opaque Siege maps use alpha as packed material data
-        # zero values indicate genuine transparent regions
-        return minimum == 0
+        _alpha_cache[filename] = result
+        return result
 
     material_count = max(used_material_ids, default=0) + 1
     materials = []
@@ -817,9 +827,14 @@ def write_gltf(model_uid: int, parts: Iterable[MeshPartLike], output_directory: 
 
     apply_skeleton_hierachy(document, skeletons)
 
-    binary_path.write_bytes(binary.data)
+    # Atomic writes: a killed export must never leave a partial .bin/.gltf
+    # behind, or the resume check (gltf exists => done) would silently keep it.
+    tmp_binary_path = binary_path.with_suffix(".bin.tmp")
+    tmp_binary_path.write_bytes(binary.data)
+    tmp_binary_path.replace(binary_path)
 
-    gltf_path.write_text(
+    tmp_gltf_path = gltf_path.with_suffix(".gltf.tmp")
+    tmp_gltf_path.write_text(
         json.dumps(
             document,
             indent=2,
@@ -827,5 +842,6 @@ def write_gltf(model_uid: int, parts: Iterable[MeshPartLike], output_directory: 
         ) + "\n",
         encoding="utf-8"
     )
+    tmp_gltf_path.replace(gltf_path)
 
     return gltf_path
