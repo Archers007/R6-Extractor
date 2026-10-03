@@ -6,6 +6,7 @@ import argparse
 import sys
 import csv
 import json
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Sequence
@@ -854,7 +855,7 @@ def command_model(args: argparse.Namespace) -> int:
     else:
         index = build_index(archives)
 
-    result = export_model(uid, children, index, args.output)
+    result = export_model(uid, children, index, args.output, progress=_throttled_progress_printer())
 
 
     print(f"Model: {result.model_uid:016X}")
@@ -868,6 +869,31 @@ def command_model(args: argparse.Namespace) -> int:
     print(f"glTF: {result.gltf_path}")
 
     return 0
+
+def _throttled_progress_printer(interval: float = 2.0):
+    """Render export_model progress as a throttled ASCII bar."""
+
+    last = [0.0]
+
+    def show(stage: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        finished = done >= total
+
+        if not finished and now - last[0] < interval:
+            return
+
+        last[0] = now
+        width = 24
+        filled = int(width * done / total) if total else width
+        bar = "#" * filled + "." * (width - filled)
+        pct = int(100 * done / total) if total else 100
+        print(f"\r  {stage:9s} [{bar}] {pct:3d}%", end="", flush=True)
+
+        if finished:
+            print(flush=True)
+
+    return show
+
 
 def _resolve_bundle(value: str, game_dir: Path) -> Path:
     """Resolve a bundle mesh archive from a path, glob pattern, or keyword."""
@@ -1063,11 +1089,23 @@ def command_maps(args: argparse.Namespace) -> int:
             )
             continue
 
+        print(
+            f"[{position}/{len(selected)}] {uid_text} "
+            f"({model.part_count} parts, {model.geometry_bytes // 1000000} MB)",
+            flush=True,
+        )
+
         try:
-            result = export_model(model.uid, children, index, model_directory)
+            result = export_model(
+                model.uid,
+                children,
+                index,
+                model_directory,
+                progress=_throttled_progress_printer(),
+            )
         except Exception as error:  # keep the batch going
             failed += 1
-            print(f"[{position}/{len(selected)}] {uid_text}: FAILED ({error})", flush=True)
+            print(f"  FAILED ({error})", flush=True)
             manifest.append(
                 {
                     "uid": uid_text,
@@ -1080,8 +1118,7 @@ def command_maps(args: argparse.Namespace) -> int:
 
         exported += 1
         print(
-            f"[{position}/{len(selected)}] {uid_text}: "
-            f"exported ({model.part_count} parts, {result.triangle_count} tris)",
+            f"  exported ({result.triangle_count} tris -> {result.gltf_path.name})",
             flush=True,
         )
         manifest.append(
