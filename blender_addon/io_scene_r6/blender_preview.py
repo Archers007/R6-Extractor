@@ -429,7 +429,7 @@ def merge_fk_armatures(body, objects):
     arms = [obj for obj in objects if obj.type == "ARMATURE"]
     heads = [arm for arm in arms if arm != body]
 
-    if bpy.context.mode != "Object" or body not in arms or not heads:
+    if bpy.context.mode != "OBJECT" or body not in arms or not heads:
         raise RuntimeError("FK merge requires body and head rigs in Object Mode")
 
     names = set()
@@ -478,7 +478,7 @@ def merge_fk_armatures(body, objects):
 
     bpy.ops.object.select_all(action="DESELECT")
     for arm in arms:
-        arms.select_set(True)
+        arm.select_set(True)
     bpy.context.view_layer.objects.active = body
 
     if "FINISHED" not in bpy.ops.object.join():
@@ -498,9 +498,9 @@ def merge_fk_armatures(body, objects):
             rest = bone.matrix.copy()
             bone.parent = body.data.edit_bones[target]
             bone.use_connect = False
-            bone.matrix = False
+            bone.matrix = rest
     finally:
-        bpy.ops.mode_set(mode="OBJECT")
+        bpy.ops.object.mode_set(mode="OBJECT")
 
     for name, target in roots:
         bone = body.pose.bones[name]
@@ -510,7 +510,7 @@ def merge_fk_armatures(body, objects):
     bpy.context.view_layer.update()
 
     error = max(
-        abs(body.poses.bones[name].matrix[r][c] - matrix[r][c])
+        abs(body.pose.bones[name].matrix[r][c] - matrix[r][c])
         for name, matrix in poses.items()
         for r in range(4) for c in range(4)
     )
