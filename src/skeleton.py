@@ -2,13 +2,34 @@
 
 import struct
 
-def read_skeleton_parents(payload):
+def _find_skeleton_starts(payload):
+    """Byte offsets where a skeleton section begins (see read_skeleton_parents)."""
     starts = []
-    for offset in range(len(payload) - 24):
-        length, kind = struct.unpack_from("<HH", payload, offset)
-        start = offset + 20 + length
-        if kind == 2 and length <= 4096 and start + 12 <= len(payload) and struct.unpack_from("<I", payload, offset + 8 + length)[0] == 0xC34A348F and struct.unpack_from("<I", payload, start)[0] == 0xC34A348F:
-            starts.append(start)
+    n = len(payload)
+    # The header's `kind` field (== 2) sits at offset+2. Sweep for its two
+    # bytes at C speed and only unpack candidates: byte-by-byte Python
+    # unpacking over a ~100MB model payload looks hung for minutes.
+    # Every offset the old loop examined with kind == 2 is still examined,
+    # in the same order.
+    pos = 0
+    limit = n - 23  # hit <= limit  <=>  offset = hit - 2 <= n - 25
+    while True:
+        hit = payload.find(b"\x02\x00", pos)
+        if hit < 0 or hit > limit:
+            break
+        offset = hit - 2
+        if offset >= 0:
+            length = struct.unpack_from("<H", payload, offset)[0]
+            start = offset + 20 + length
+            if length <= 4096 and start + 12 <= n and struct.unpack_from("<I", payload, offset + 8 + length)[0] == 0xC34A348F and struct.unpack_from("<I", payload, start)[0] == 0xC34A348F:
+                starts.append(start)
+        pos = hit + 1
+
+    return starts
+
+
+def read_skeleton_parents(payload):
+    starts = _find_skeleton_starts(payload)
 
     results = []
     marker = struct.pack("<I", 0xF6ECC8A9)
