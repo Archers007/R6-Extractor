@@ -71,15 +71,20 @@ def read_model_skeletons(payload):
 
         blob = payload[entry.data_offset:entry.end]
         if len(blob) < 20:
-            raise ValueError("Truncated mesh binding")
+            # Placeholder/degenerate mesh entries carry no skeleton data.
+            continue
 
         count = struct.unpack_from("<I", blob, 8)[0]
         offset = 21 + count * 80
         if offset + 8 > len(blob):
-            raise ValueError("Truncated mesh geometry reference")
+            print("WARNING: Skipping mesh entry with truncated geometry reference", flush=True)
+            continue
 
         geometry = struct.unpack_from("<Q", blob, offset)[0]
-        results[geometry] = read_skeleton_parents(blob)
+        try:
+            results[geometry] = read_skeleton_parents(blob)
+        except ValueError as exc:
+            print(f"WARNING: Skipping unreadable skeleton data for geometry {geometry:016X}: {exc}", flush=True)
 
     return results
 
