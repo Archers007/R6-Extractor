@@ -873,10 +873,15 @@ def is_blank_texture(path: Path) -> bool:
 
     return all(maximum < 8 for _, maximum in extrema)
 
-def decode_model_textures(texture_uids: Iterable[int], index: AssetIndex, output_directory: Path) -> tuple[list[tuple[int, int, str]], str | None, str | None, str | None]:
+def decode_model_textures(texture_uids: Iterable[int], index: AssetIndex, output_directory: Path, progress=None) -> tuple[list[tuple[int, int, str]], str | None, str | None, str | None]:
     decoded: list[tuple[int, int, str]] = []
+    texture_uids = tuple(texture_uids)
+    total = len(texture_uids)
 
-    for texture_uid in texture_uids:
+    for position, texture_uid in enumerate(texture_uids):
+        if progress is not None:
+            progress("textures", position + 1, total)
+
         record = index.primary(texture_uid)
         if record is None:
             continue
@@ -1051,7 +1056,6 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
         }
 
     parts = decode_mesh_parts(geometry_records, mesh_bindings, progress=lambda stage, done, total: _report(stage, done, total))
-    _report("textures", 0, 1)
     texture_uids = resolve_texture_uids(model_uid, children, index)
 
     (
@@ -1059,8 +1063,7 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
         diffuse,
         normal,
         specular
-    ) = decode_model_textures(texture_uids, index, output_directory)
-    _report("textures", 1, 1)
+    ) = decode_model_textures(texture_uids, index, output_directory, progress=lambda stage, done, total: _report(stage, done, total))
 
     export_parts = parts
     material_textures: tuple[MaterialTextures, ...] = ()
@@ -1107,11 +1110,14 @@ def export_model(model_uid: int, children: Mapping[int, Iterable[int]], index: A
             export_parts = tuple(rebased_parts)
             material_textures = tuple(resolved_materials)
 
-    material_textures = tuple(
-        bake_tinted_material(slot, output_directory)
-        for slot in material_textures
-    )
-    _report("materials", 1, 1)
+    material_slots = tuple(material_textures)
+    baked_materials: list = []
+
+    for position, slot in enumerate(material_slots):
+        _report("materials", position + 1, max(1, len(material_slots)))
+        baked_materials.append(bake_tinted_material(slot, output_directory))
+
+    material_textures = tuple(baked_materials)
 
     part_count = len(parts)
     vertex_count = sum(len(part.vertices) for part in parts)
